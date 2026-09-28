@@ -23,7 +23,7 @@ export async function requireAuth(req, res, next) {
     next();
   } catch {
     res.status(500).json({ error: "Auth failed" });
-  }
+  } 
 }
 
 export function requireRole(...roles) {
