@@ -9,9 +9,9 @@ const app = express();
 
 /**
  * CORS
- * - Supports comma-separated CORS_ORIGIN env (ex: "http://localhost:5173,https://myapp.netlify.app")
+ * - Supports comma-separated CORS_ORIGIN env
  * - Supports "*" for dev
- * - Also allows StackBlitz/WebContainer preview domains
+ * - Allows StackBlitz/WebContainer preview domains
  */
 const envOrigins = (process.env.CORS_ORIGIN || "")
   .split(",")
@@ -20,16 +20,10 @@ const envOrigins = (process.env.CORS_ORIGIN || "")
 
 const corsOptions = {
   origin: (origin, cb) => {
-    // allow requests like Postman/curl (no Origin header)
     if (!origin) return cb(null, true);
-
-    // allow all (dev)
     if (envOrigins.includes("*")) return cb(null, true);
-
-    // allow exact matches from env
     if (envOrigins.includes(origin)) return cb(null, true);
 
-    // allow StackBlitz/WebContainer domains
     if (origin.includes(".webcontainer.io") || origin.includes(".stackblitz.io")) {
       return cb(null, true);
     }
@@ -42,8 +36,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // handle all preflight
-
+app.options("*", cors(corsOptions));
 app.use(express.json());
 
 const toNum = (v) => (v === null || v === undefined ? 0 : Number(v));
@@ -55,14 +48,118 @@ app.get("/health", (req, res) => res.json({ ok: true }));
  * Common
  */
 app.get("/me", requireAuth, async (req, res) => {
-  res.json({ id: req.user.id, role: req.user.role, full_name: req.user.full_name });
+  res.json({
+    id: req.user.id,
+    role: req.user.role,
+    full_name: req.user.full_name,
+    officer_title: req.user.officer_title ?? null
+  });
+});
+
+/**
+ * ACCOUNTS
+ * Dean -> create Officer/President accounts (with officer_title)
+ * Officer OR President -> create Student accounts
+ */
+const OfficerTitleEnum = z.enum([
+  "President",
+  "VP Internal",
+  "VP External",
+  "Secretary",
+  "PIO",
+  "Auditor",
+  "Treasurer"
+]);
+
+app.post("/accounts/officers", requireAuth, requireRole("dean"), async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    full_name: z.string().min(2),
+    officer_title: OfficerTitleEnum
+  });
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const role = body.data.officer_title === "President" ? "president" : "officer";
+
+  // Create user in Supabase Auth (Admin API)
+  const created = await supabaseAdmin.auth.admin.createUser({
+    email: body.data.email,
+    password: body.data.password,
+    email_confirm: true
+  });
+
+  if (created.error) return res.status(400).json({ error: created.error.message });
+
+  const userId = created.data.user.id;
+
+  // Create profile row
+  const prof = await supabaseAdmin.from("profiles").insert({
+    id: userId,
+    role,
+    full_name: body.data.full_name,
+    officer_title: body.data.officer_title
+  });
+
+  if (prof.error) {
+    // rollback
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+    return res.status(400).json({ error: prof.error.message });
+  }
+
+  res.json({
+    id: userId,
+    email: body.data.email,
+    role,
+    full_name: body.data.full_name,
+    officer_title: body.data.officer_title
+  });
+});
+
+app.post("/accounts/students", requireAuth, requireRole("officer", "president"), async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6),
+    full_name: z.string().min(2)
+  });
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const created = await supabaseAdmin.auth.admin.createUser({
+    email: body.data.email,
+    password: body.data.password,
+    email_confirm: true
+  });
+
+  if (created.error) return res.status(400).json({ error: created.error.message });
+
+  const userId = created.data.user.id;
+
+  const prof = await supabaseAdmin.from("profiles").insert({
+    id: userId,
+    role: "student",
+    full_name: body.data.full_name,
+    created_by: req.user.id
+  });
+
+  if (prof.error) {
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+    return res.status(400).json({ error: prof.error.message });
+  }
+
+  res.json({
+    id: userId,
+    email: body.data.email,
+    role: "student",
+    full_name: body.data.full_name
+  });
 });
 
 /**
  * PROPOSALS
- * - Student: sees approved only
- * - Officer: sees own proposals
- * - Dean: sees all proposals (optional filter status)
  */
 app.get("/proposals", requireAuth, async (req, res) => {
   const status = req.query.status; // pending/approved/rejected
@@ -121,14 +218,22 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer"), async (req, res
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
-  // Ensure it belongs to officer and is pending
-  const current = await supabaseAdmin.from("proposals").select("id, created_by, status").eq("id", req.params.id).single();
+  const current = await supabaseAdmin
+    .from("proposals")
+    .select("id, created_by, status")
+    .eq("id", req.params.id)
+    .single();
 
   if (current.error) return res.status(400).json({ error: current.error.message });
   if (current.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
   if (current.data.status !== "pending") return res.status(400).json({ error: "Only pending proposals can be edited" });
 
-  const { data, error } = await supabaseAdmin.from("proposals").update(body.data).eq("id", req.params.id).select("*").single();
+  const { data, error } = await supabaseAdmin
+    .from("proposals")
+    .update(body.data)
+    .eq("id", req.params.id)
+    .select("*")
+    .single();
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
@@ -177,7 +282,6 @@ app.get("/events", requireAuth, async (req, res) => {
 
 /**
  * PAYMENTS
- * Student: create payment (partial/full) + receipt
  */
 app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
   const schema = z.object({
@@ -189,15 +293,17 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
-  // proposal must be approved
-  const proposal = await supabaseAdmin.from("proposals").select("id, status, required_per_student").eq("id", body.data.proposal_id).single();
+  const proposal = await supabaseAdmin
+    .from("proposals")
+    .select("id, status, required_per_student")
+    .eq("id", body.data.proposal_id)
+    .single();
 
   if (proposal.error) return res.status(400).json({ error: proposal.error.message });
   if (proposal.data.status !== "approved") return res.status(400).json({ error: "Event not available (not approved)" });
 
   const required = toNum(proposal.data.required_per_student);
 
-  // compute remaining for this student
   const paid = await supabaseAdmin
     .from("payments")
     .select("amount")
@@ -227,7 +333,6 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
 
   if (payment.error) return res.status(400).json({ error: payment.error.message });
 
-  // generate receipt number from DB function
   const rno = await supabaseAdmin.rpc("generate_receipt_no");
   if (rno.error) return res.status(400).json({ error: rno.error.message });
 
@@ -263,8 +368,11 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
  * Officer: view payments for own proposal
  */
 app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), async (req, res) => {
-  // verify ownership
-  const pr = await supabaseAdmin.from("proposals").select("id, created_by").eq("id", req.params.id).single();
+  const pr = await supabaseAdmin
+    .from("proposals")
+    .select("id, created_by")
+    .eq("id", req.params.id)
+    .single();
 
   if (pr.error) return res.status(400).json({ error: pr.error.message });
   if (pr.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
@@ -284,7 +392,10 @@ app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), 
  * Dean: department-level totals
  */
 app.get("/reports/department", requireAuth, requireRole("dean"), async (req, res) => {
-  const proposals = await supabaseAdmin.from("proposals").select("id, title, status, budget_total, required_per_student");
+  const proposals = await supabaseAdmin
+    .from("proposals")
+    .select("id, title, status, budget_total, required_per_student");
+
   if (proposals.error) return res.status(400).json({ error: proposals.error.message });
 
   const payments = await supabaseAdmin.from("payments").select("proposal_id, amount");
