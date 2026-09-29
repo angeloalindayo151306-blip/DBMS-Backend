@@ -4,12 +4,18 @@ import cors from "cors";
 import { z } from "zod";
 import { supabaseAdmin } from "./supabase.js";
 import { requireAuth, requireRole } from "./auth.js";
-import cors from "cors";
 
-// allow list from env (comma separated), OR use "*" for dev
+const app = express();
+
+/**
+ * CORS
+ * - Supports comma-separated CORS_ORIGIN env (ex: "http://localhost:5173,https://myapp.netlify.app")
+ * - Supports "*" for dev
+ * - Also allows StackBlitz/WebContainer preview domains
+ */
 const envOrigins = (process.env.CORS_ORIGIN || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 const corsOptions = {
@@ -23,22 +29,21 @@ const corsOptions = {
     // allow exact matches from env
     if (envOrigins.includes(origin)) return cb(null, true);
 
-    // allow StackBlitz / WebContainer preview domains
-    if (origin.endsWith(".webcontainer.io") || origin.endsWith(".stackblitz.io")) {
+    // allow StackBlitz/WebContainer domains
+    if (origin.includes(".webcontainer.io") || origin.includes(".stackblitz.io")) {
       return cb(null, true);
     }
 
     return cb(new Error(`CORS blocked: ${origin}`), false);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions)); // handles preflight
+app.options("*", cors(corsOptions)); // handle all preflight
 
-const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : "*" }));
 app.use(express.json());
 
 const toNum = (v) => (v === null || v === undefined ? 0 : Number(v));
@@ -117,22 +122,13 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer"), async (req, res
   if (!body.success) return res.status(400).json(body.error);
 
   // Ensure it belongs to officer and is pending
-  const current = await supabaseAdmin
-    .from("proposals")
-    .select("id, created_by, status")
-    .eq("id", req.params.id)
-    .single();
+  const current = await supabaseAdmin.from("proposals").select("id, created_by, status").eq("id", req.params.id).single();
 
   if (current.error) return res.status(400).json({ error: current.error.message });
   if (current.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
   if (current.data.status !== "pending") return res.status(400).json({ error: "Only pending proposals can be edited" });
 
-  const { data, error } = await supabaseAdmin
-    .from("proposals")
-    .update(body.data)
-    .eq("id", req.params.id)
-    .select("*")
-    .single();
+  const { data, error } = await supabaseAdmin.from("proposals").update(body.data).eq("id", req.params.id).select("*").single();
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
@@ -169,7 +165,6 @@ app.patch("/proposals/:id/status", requireAuth, requireRole("dean"), async (req,
  * EVENTS alias (for students): approved proposals
  */
 app.get("/events", requireAuth, async (req, res) => {
-  // Student UI can call /events instead of filtering proposals
   const { data, error } = await supabaseAdmin
     .from("proposals")
     .select("*")
@@ -195,11 +190,7 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
   if (!body.success) return res.status(400).json(body.error);
 
   // proposal must be approved
-  const proposal = await supabaseAdmin
-    .from("proposals")
-    .select("id, status, required_per_student")
-    .eq("id", body.data.proposal_id)
-    .single();
+  const proposal = await supabaseAdmin.from("proposals").select("id, status, required_per_student").eq("id", body.data.proposal_id).single();
 
   if (proposal.error) return res.status(400).json({ error: proposal.error.message });
   if (proposal.data.status !== "approved") return res.status(400).json({ error: "Event not available (not approved)" });
@@ -270,15 +261,10 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 
 /**
  * Officer: view payments for own proposal
- * /officer/proposals/:id/payments
  */
 app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), async (req, res) => {
   // verify ownership
-  const pr = await supabaseAdmin
-    .from("proposals")
-    .select("id, created_by")
-    .eq("id", req.params.id)
-    .single();
+  const pr = await supabaseAdmin.from("proposals").select("id, created_by").eq("id", req.params.id).single();
 
   if (pr.error) return res.status(400).json({ error: pr.error.message });
   if (pr.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
@@ -298,16 +284,10 @@ app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), 
  * Dean: department-level totals
  */
 app.get("/reports/department", requireAuth, requireRole("dean"), async (req, res) => {
-  const proposals = await supabaseAdmin
-    .from("proposals")
-    .select("id, title, status, budget_total, required_per_student");
-
+  const proposals = await supabaseAdmin.from("proposals").select("id, title, status, budget_total, required_per_student");
   if (proposals.error) return res.status(400).json({ error: proposals.error.message });
 
-  const payments = await supabaseAdmin
-    .from("payments")
-    .select("proposal_id, amount");
-
+  const payments = await supabaseAdmin.from("payments").select("proposal_id, amount");
   if (payments.error) return res.status(400).json({ error: payments.error.message });
 
   const collectedByProposal = new Map();
