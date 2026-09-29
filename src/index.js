@@ -95,16 +95,21 @@ app.post("/accounts/officers", requireAuth, requireRole("dean"), async (req, res
 
   const userId = created.data.user.id;
 
-  // Create profile row
-  const prof = await supabaseAdmin.from("profiles").insert({
-    id: userId,
-    role,
-    full_name: body.data.full_name,
-    officer_title: body.data.officer_title
-  });
+  // IMPORTANT: use UPSERT (because profiles row may already be created by a DB trigger)
+  const prof = await supabaseAdmin
+    .from("profiles")
+    .upsert(
+      {
+        id: userId,
+        role,
+        full_name: body.data.full_name,
+        officer_title: body.data.officer_title
+      },
+      { onConflict: "id" }
+    );
 
   if (prof.error) {
-    // rollback
+    // rollback auth user if profile update fails
     await supabaseAdmin.auth.admin.deleteUser(userId);
     return res.status(400).json({ error: prof.error.message });
   }
@@ -138,12 +143,18 @@ app.post("/accounts/students", requireAuth, requireRole("officer", "president"),
 
   const userId = created.data.user.id;
 
-  const prof = await supabaseAdmin.from("profiles").insert({
-    id: userId,
-    role: "student",
-    full_name: body.data.full_name,
-    created_by: req.user.id
-  });
+  // IMPORTANT: use UPSERT here too
+  const prof = await supabaseAdmin
+    .from("profiles")
+    .upsert(
+      {
+        id: userId,
+        role: "student",
+        full_name: body.data.full_name,
+        created_by: req.user.id
+      },
+      { onConflict: "id" }
+    );
 
   if (prof.error) {
     await supabaseAdmin.auth.admin.deleteUser(userId);
