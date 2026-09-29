@@ -168,7 +168,9 @@ app.get("/proposals", requireAuth, async (req, res) => {
 
   if (req.user.role === "student") q = q.eq("status", "approved");
   if (req.user.role === "officer") q = q.eq("created_by", req.user.id);
-  if (req.user.role === "dean" && status) q = q.eq("status", status);
+  if ((req.user.role === "dean" || req.user.role === "president") && status) {
+    q = q.eq("status", status);
+  }
 
   const { data, error } = await q;
   if (error) return res.status(400).json({ error: error.message });
@@ -391,7 +393,7 @@ app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), 
  * REPORTS
  * Dean: department-level totals
  */
-app.get("/reports/department", requireAuth, requireRole("dean"), async (req, res) => {
+app.get("/reports/department", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const proposals = await supabaseAdmin
     .from("proposals")
     .select("id, title, status, budget_total, required_per_student");
