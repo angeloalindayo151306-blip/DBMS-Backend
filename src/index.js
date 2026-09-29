@@ -4,6 +4,38 @@ import cors from "cors";
 import { z } from "zod";
 import { supabaseAdmin } from "./supabase.js";
 import { requireAuth, requireRole } from "./auth.js";
+import cors from "cors";
+
+// allow list from env (comma separated), OR use "*" for dev
+const envOrigins = (process.env.CORS_ORIGIN || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    // allow requests like Postman/curl (no Origin header)
+    if (!origin) return cb(null, true);
+
+    // allow all (dev)
+    if (envOrigins.includes("*")) return cb(null, true);
+
+    // allow exact matches from env
+    if (envOrigins.includes(origin)) return cb(null, true);
+
+    // allow StackBlitz / WebContainer preview domains
+    if (origin.endsWith(".webcontainer.io") || origin.endsWith(".stackblitz.io")) {
+      return cb(null, true);
+    }
+
+    return cb(new Error(`CORS blocked: ${origin}`), false);
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // handles preflight
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : "*" }));
