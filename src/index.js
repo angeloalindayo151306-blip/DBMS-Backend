@@ -503,7 +503,7 @@ app.get(
     const { data, error } = await supabaseAdmin
       .from("payments")
       .select(`
-        id, proposal_id, student_id, amount, method, reference_no, paid_at, created_at,
+        id, proposal_id, student_id, amount, method, reference_no, paid_at,
         receipts ( receipt_no ),
         student:profiles!payments_student_id_fkey (
           id, full_name, first_name, middle_name, last_name, course, year_level
