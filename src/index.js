@@ -41,6 +41,35 @@ app.use(express.json());
 
 const toNum = (v) => (v === null || v === undefined ? 0 : Number(v));
 
+const CourseEnum = z.enum(["IT", "CS"]);
+
+function buildFullName({ first_name, middle_name, last_name }) {
+  return [first_name, middle_name, last_name].filter(Boolean).join(" ").trim();
+}
+
+function calcAge(dobStr) {
+  if (!dobStr) return null;
+  const dob = new Date(dobStr);
+  if (Number.isNaN(dob.getTime())) return null;
+
+  const today = new Date();
+  let age = today.getFullYear() - dob.getFullYear();
+  const m = today.getMonth() - dob.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+  return age;
+}
+
+const baseProfileSchema = z.object({
+  first_name: z.string().min(1),
+  middle_name: z.string().optional(),
+  last_name: z.string().min(1),
+  date_of_birth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), // YYYY-MM-DD
+  address: z.string().min(3),
+  mobile_number: z.string().min(7),
+  course: CourseEnum,
+  year_level: z.number().int().min(1).max(5)
+});
+
 app.get("/", (req, res) => res.send("DBMS-backend running"));
 app.get("/health", (req, res) => res.json({ ok: true }));
 
@@ -52,7 +81,12 @@ app.get("/me", requireAuth, async (req, res) => {
     id: req.user.id,
     role: req.user.role,
     full_name: req.user.full_name,
-    officer_title: req.user.officer_title ?? null
+    officer_title: req.user.officer_title ?? null,
+    first_name: req.user.first_name ?? null,
+    middle_name: req.user.middle_name ?? null,
+    last_name: req.user.last_name ?? null,
+    course: req.user.course ?? null,
+    year_level: req.user.year_level ?? null
   });
 });
 
@@ -61,96 +95,92 @@ app.get("/me", requireAuth, async (req, res) => {
  * Dean -> create Officer/President accounts (with officer_title)
  * Officer OR President -> create Student accounts
  */
-const OfficerTitleEnum = z.enum([
-  "President",
-  "VP Internal",
-  "VP External",
-  "Secretary",
-  "PIO",
-  "Auditor",
-  "Treasurer"
-]);
-
-app.post("/accounts/officers", requireAuth, requireRole("dean"), async (req, res) => {
+app.post("/accounts/deans", requireAuth, requireRole("dean"), async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
-    password: z.string().min(6),
-    full_name: z.string().min(2),
-    officer_title: OfficerTitleEnum
-  });
+    password: z.string().min(6)
+  }).and(baseProfileSchema);
 
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
-  const role = body.data.officer_title === "President" ? "president" : "officer";
+  const full_name = buildFullName(body.data);
+  const age = calcAge(body.data.date_of_birth);
 
-  // Create user in Supabase Auth (Admin API)
   const created = await supabaseAdmin.auth.admin.createUser({
     email: body.data.email,
     password: body.data.password,
     email_confirm: true
   });
-
   if (created.error) return res.status(400).json({ error: created.error.message });
 
   const userId = created.data.user.id;
 
-  // IMPORTANT: use UPSERT (because profiles row may already be created by a DB trigger)
   const prof = await supabaseAdmin
     .from("profiles")
     .upsert(
       {
         id: userId,
-        role,
-        full_name: body.data.full_name,
-        officer_title: body.data.officer_title
+        role: "dean",
+        full_name,
+        first_name: body.data.first_name,
+        middle_name: body.data.middle_name ?? null,
+        last_name: body.data.last_name,
+        date_of_birth: body.data.date_of_birth,
+        age,
+        address: body.data.address,
+        mobile_number: body.data.mobile_number,
+        course: body.data.course,
+        year_level: body.data.year_level
       },
       { onConflict: "id" }
     );
 
   if (prof.error) {
-    // rollback auth user if profile update fails
     await supabaseAdmin.auth.admin.deleteUser(userId);
     return res.status(400).json({ error: prof.error.message });
   }
 
-  res.json({
-    id: userId,
-    email: body.data.email,
-    role,
-    full_name: body.data.full_name,
-    officer_title: body.data.officer_title
-  });
+  res.json({ id: userId, email: body.data.email, role: "dean", full_name });
 });
 
-app.post("/accounts/students", requireAuth, requireRole("officer", "president"), async (req, res) => {
+app.post("/accounts/students", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const schema = z.object({
     email: z.string().email(),
-    password: z.string().min(6),
-    full_name: z.string().min(2)
-  });
+    password: z.string().min(6)
+  }).and(baseProfileSchema);
 
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
+
+  const full_name = buildFullName(body.data);
+  const age = calcAge(body.data.date_of_birth);
 
   const created = await supabaseAdmin.auth.admin.createUser({
     email: body.data.email,
     password: body.data.password,
     email_confirm: true
   });
-
   if (created.error) return res.status(400).json({ error: created.error.message });
 
   const userId = created.data.user.id;
 
-  // IMPORTANT: use UPSERT here too
   const prof = await supabaseAdmin
     .from("profiles")
     .upsert(
       {
         id: userId,
         role: "student",
-        full_name: body.data.full_name,
+        full_name,
+        first_name: body.data.first_name,
+        middle_name: body.data.middle_name ?? null,
+        last_name: body.data.last_name,
+        date_of_birth: body.data.date_of_birth,
+        age,
+        address: body.data.address,
+        mobile_number: body.data.mobile_number,
+        course: body.data.course,
+        year_level: body.data.year_level,
         created_by: req.user.id
       },
       { onConflict: "id" }
@@ -161,12 +191,56 @@ app.post("/accounts/students", requireAuth, requireRole("officer", "president"),
     return res.status(400).json({ error: prof.error.message });
   }
 
-  res.json({
-    id: userId,
+  res.json({ id: userId, email: body.data.email, role: "student", full_name });
+});
+
+app.post("/accounts/deans", requireAuth, requireRole("dean"), async (req, res) => {
+  const schema = z.object({
+    email: z.string().email(),
+    password: z.string().min(6)
+  }).and(baseProfileSchema);
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const full_name = buildFullName(body.data);
+  const age = calcAge(body.data.date_of_birth);
+
+  const created = await supabaseAdmin.auth.admin.createUser({
     email: body.data.email,
-    role: "student",
-    full_name: body.data.full_name
+    password: body.data.password,
+    email_confirm: true
   });
+  if (created.error) return res.status(400).json({ error: created.error.message });
+
+  const userId = created.data.user.id;
+
+  const prof = await supabaseAdmin
+    .from("profiles")
+    .upsert(
+      {
+        id: userId,
+        role: "dean",
+        full_name,
+        first_name: body.data.first_name,
+        middle_name: body.data.middle_name ?? null,
+        last_name: body.data.last_name,
+        date_of_birth: body.data.date_of_birth,
+        age,
+        address: body.data.address,
+        mobile_number: body.data.mobile_number,
+        course: body.data.course,
+        year_level: body.data.year_level
+      },
+      { onConflict: "id" }
+    );
+
+  if (prof.error) {
+    await supabaseAdmin.auth.admin.deleteUser(userId);
+    return res.status(400).json({ error: prof.error.message });
+  }
+
+  res.json({ id: userId, email: body.data.email, role: "dean", full_name });
 });
 
 /**
@@ -404,7 +478,8 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 /**
  * Officer: view payments for own proposal
  */
-app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), async (req, res) => {
+app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer", "president"), async (req, res) => {
+  // verify ownership
   const pr = await supabaseAdmin
     .from("proposals")
     .select("id, created_by")
@@ -416,7 +491,11 @@ app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer"), 
 
   const { data, error } = await supabaseAdmin
     .from("payments")
-    .select("*, receipts(*)")
+    .select(`
+      id, proposal_id, student_id, amount, method, reference_no, paid_at, created_at,
+      receipts ( receipt_no ),
+      student:profiles ( id, full_name, first_name, middle_name, last_name, course, year_level )
+    `)
     .eq("proposal_id", req.params.id)
     .order("paid_at", { ascending: false });
 

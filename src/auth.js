@@ -4,7 +4,6 @@ export async function requireAuth(req, res, next) {
   try {
     const auth = req.headers.authorization || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-
     if (!token) return res.status(401).json({ error: "Missing bearer token" });
 
     const { data, error } = await supabaseAdmin.auth.getUser(token);
@@ -14,23 +13,26 @@ export async function requireAuth(req, res, next) {
 
     const prof = await supabaseAdmin
       .from("profiles")
-      .select("role, full_name, officer_title")
+      .select("role, full_name, officer_title, first_name, middle_name, last_name, course, year_level")
       .eq("id", userId)
       .single();
 
-    if (prof.error || !prof.data) {
-      return res.status(403).json({ error: "Profile not found" });
-    }
+    if (prof.error || !prof.data) return res.status(403).json({ error: "Profile not found" });
 
     req.user = {
       id: userId,
       role: prof.data.role,
       full_name: prof.data.full_name,
-      officer_title: prof.data.officer_title ?? null
+      officer_title: prof.data.officer_title ?? null,
+      first_name: prof.data.first_name ?? null,
+      middle_name: prof.data.middle_name ?? null,
+      last_name: prof.data.last_name ?? null,
+      course: prof.data.course ?? null,
+      year_level: prof.data.year_level ?? null
     };
 
     next();
-  } catch (e) {
+  } catch {
     res.status(500).json({ error: "Auth failed" });
   }
 }
