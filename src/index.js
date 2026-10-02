@@ -252,9 +252,11 @@ app.get("/proposals", requireAuth, async (req, res) => {
   let q = supabaseAdmin.from("proposals").select("*").order("created_at", { ascending: false });
 
   if (req.user.role === "student") q = q.eq("status", "approved");
-  if (req.user.role === "officer" || req.user.role === "president") {
-    q = q.eq("created_by", req.user.id);
-  }
+
+  // officer sees own
+  if (req.user.role === "officer") q = q.eq("created_by", req.user.id);
+
+  // dean/president can filter by status (and otherwise see all)
   if ((req.user.role === "dean" || req.user.role === "president") && status) {
     q = q.eq("status", status);
   }
@@ -480,30 +482,33 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 /**
  * Officer: view payments for own proposal
  */
-app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer", "president"), async (req, res) => {
-  // verify ownership
-  const pr = await supabaseAdmin
-    .from("proposals")
-    .select("id, created_by")
-    .eq("id", req.params.id)
-    .single();
+app.get(
+  "/officer/proposals/:id/payments",
+  requireAuth,
+  requireRole("officer", "president"),
+  async (req, res) => {
+    // verify ownership ONLY for officer, not for president
+    if (req.user.role === "officer") {
+      const pr = await supabaseAdmin
+        .from("proposals")
+        .select("id, created_by")
+        .eq("id", req.params.id)
+        .single();
 
-  if (pr.error) return res.status(400).json({ error: pr.error.message });
-  if (pr.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
+      if (pr.error) return res.status(400).json({ error: pr.error.message });
+      if (pr.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
+    }
 
-  const { data, error } = await supabaseAdmin
-    .from("payments")
-    .select(`
-      id, proposal_id, student_id, amount, method, reference_no, paid_at, created_at,
-      receipts ( receipt_no ),
-      student:profiles ( id, full_name, first_name, middle_name, last_name, course, year_level )
-    `)
-    .eq("proposal_id", req.params.id)
-    .order("paid_at", { ascending: false });
+    const { data, error } = await supabaseAdmin
+      .from("payments")
+      .select("*, receipts(*)")
+      .eq("proposal_id", req.params.id)
+      .order("paid_at", { ascending: false });
 
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
-});
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  }
+);
 
 /**
  * REPORTS
