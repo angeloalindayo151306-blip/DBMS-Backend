@@ -496,12 +496,19 @@ app.get(
         .single();
 
       if (pr.error) return res.status(400).json({ error: pr.error.message });
-      if (pr.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
+      if (pr.data.created_by !== req.user.id)
+        return res.status(403).json({ error: "Not your proposal" });
     }
 
     const { data, error } = await supabaseAdmin
       .from("payments")
-      .select("*, receipts(*)")
+      .select(`
+        id, proposal_id, student_id, amount, method, reference_no, paid_at, created_at,
+        receipts ( receipt_no ),
+        student:profiles!payments_student_id_fkey (
+          id, full_name, first_name, middle_name, last_name, course, year_level
+        )
+      `)
       .eq("proposal_id", req.params.id)
       .order("paid_at", { ascending: false });
 
