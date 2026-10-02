@@ -252,7 +252,9 @@ app.get("/proposals", requireAuth, async (req, res) => {
   let q = supabaseAdmin.from("proposals").select("*").order("created_at", { ascending: false });
 
   if (req.user.role === "student") q = q.eq("status", "approved");
-  if (req.user.role === "officer") q = q.eq("created_by", req.user.id);
+  if (req.user.role === "officer" || req.user.role === "president") {
+    q = q.eq("created_by", req.user.id);
+  }
   if ((req.user.role === "dean" || req.user.role === "president") && status) {
     q = q.eq("status", status);
   }
@@ -265,7 +267,7 @@ app.get("/proposals", requireAuth, async (req, res) => {
 /**
  * Officer: create proposal
  */
-app.post("/proposals", requireAuth, requireRole("officer"), async (req, res) => {
+app.post("/proposals", requireAuth, requireRole("officer", "president"), async (req, res) => {
   const itemSchema = z.object({
     name: z.string().min(1),
     amount: z.number().nonnegative()
@@ -304,7 +306,7 @@ app.post("/proposals", requireAuth, requireRole("officer"), async (req, res) => 
 /**
  * Officer: edit own proposal ONLY if still pending
  */
-app.patch("/proposals/:id", requireAuth, requireRole("officer"), async (req, res) => {
+app.patch("/proposals/:id", requireAuth, requireRole("officer", "president"), async (req, res) => {
   const itemSchema = z.object({
     name: z.string().min(1),
     amount: z.number().nonnegative()
