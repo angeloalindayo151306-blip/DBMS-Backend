@@ -192,14 +192,21 @@ app.get("/proposals", requireAuth, async (req, res) => {
  * Officer: create proposal
  */
 app.post("/proposals", requireAuth, requireRole("officer"), async (req, res) => {
+  const itemSchema = z.object({
+    name: z.string().min(1),
+    amount: z.number().nonnegative()
+  });
+
   const schema = z.object({
     title: z.string().min(3),
     description: z.string().optional(),
-    budget_total: z.number().nonnegative(),
-    required_per_student: z.number().nonnegative()
+    breakdown: z.array(itemSchema).min(1)
   });
+
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
+
+  const requiredPerStudent = body.data.breakdown.reduce((sum, it) => sum + Number(it.amount || 0), 0);
 
   const { data, error } = await supabaseAdmin
     .from("proposals")
@@ -207,8 +214,10 @@ app.post("/proposals", requireAuth, requireRole("officer"), async (req, res) => 
       created_by: req.user.id,
       title: body.data.title,
       description: body.data.description ?? null,
-      budget_total: body.data.budget_total,
-      required_per_student: body.data.required_per_student,
+      breakdown: body.data.breakdown,
+      // keep these fields for your existing payment validation/reporting
+      required_per_student: requiredPerStudent,
+      budget_total: requiredPerStudent, // for now same; later you can change meaning
       status: "pending"
     })
     .select("*")
@@ -222,15 +231,21 @@ app.post("/proposals", requireAuth, requireRole("officer"), async (req, res) => 
  * Officer: edit own proposal ONLY if still pending
  */
 app.patch("/proposals/:id", requireAuth, requireRole("officer"), async (req, res) => {
+  const itemSchema = z.object({
+    name: z.string().min(1),
+    amount: z.number().nonnegative()
+  });
+
   const schema = z.object({
     title: z.string().min(3).optional(),
     description: z.string().optional(),
-    budget_total: z.number().nonnegative().optional(),
-    required_per_student: z.number().nonnegative().optional()
+    breakdown: z.array(itemSchema).min(1).optional()
   });
+
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
+  // Ensure it belongs to officer and is pending
   const current = await supabaseAdmin
     .from("proposals")
     .select("id, created_by, status")
@@ -241,9 +256,18 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer"), async (req, res
   if (current.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
   if (current.data.status !== "pending") return res.status(400).json({ error: "Only pending proposals can be edited" });
 
+  const updatePayload = { ...body.data };
+
+  // If breakdown is updated, recompute required_per_student + budget_total
+  if (body.data.breakdown) {
+    const requiredPerStudent = body.data.breakdown.reduce((sum, it) => sum + Number(it.amount || 0), 0);
+    updatePayload.required_per_student = requiredPerStudent;
+    updatePayload.budget_total = requiredPerStudent;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("proposals")
-    .update(body.data)
+    .update(updatePayload)
     .eq("id", req.params.id)
     .select("*")
     .single();
