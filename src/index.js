@@ -800,23 +800,15 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
  * - Officer: only own proposals
  * - President: can view any proposal payments
  */
+/**
+ * Officer/President: view payments for a proposal
+ * UPDATED RULE: Officer can view ANY proposal payments (same as President)
+ */
 app.get(
   "/officer/proposals/:id/payments",
   requireAuth,
   requireRole("officer", "president"),
   async (req, res) => {
-    if (req.user.role === "officer") {
-      const pr = await supabaseAdmin
-        .from("proposals")
-        .select("id, created_by")
-        .eq("id", req.params.id)
-        .single();
-
-      if (pr.error) return res.status(400).json({ error: pr.error.message });
-      if (pr.data.created_by !== req.user.id)
-        return res.status(403).json({ error: "Not your proposal" });
-    }
-
     const { data, error } = await supabaseAdmin
       .from("payments")
       .select(`
