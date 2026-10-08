@@ -510,21 +510,16 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 });
 
 /**
- * DELETE ACCOUNT (safe)
- * - Deletes Supabase Auth user (removes login access)
- * - Keeps profiles row to preserve history (payments/proposals foreign keys)
- *
- * Permissions:
- * - Dean: can delete anyone
- * - President: can delete student/officer only
- * - Cannot delete self
+ * DELETE ACCOUNT (SAFE = disable login)
+ * - Disables Supabase Auth user (ban) so they cannot login
+ * - Keeps profiles row + history intact
  */
 app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
   try {
     const id = req.params.id;
 
     if (id === req.user.id) {
-      return res.status(400).json({ error: "You cannot delete your own account." });
+      return res.status(400).json({ error: "You cannot disable your own account." });
     }
 
     const target = await supabaseAdmin
@@ -538,15 +533,17 @@ app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async
     const targetRole = target.data.role;
 
     if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
-      return res
-        .status(403)
-        .json({ error: "President can only delete Student and Officer accounts." });
+      return res.status(403).json({ error: "President can only disable Student and Officer accounts." });
     }
 
-    const del = await supabaseAdmin.auth.admin.deleteUser(id);
-    if (del.error) return res.status(400).json({ error: del.error.message });
+    // Disable login for a very long time (acts like deactivation)
+    const ban = await supabaseAdmin.auth.admin.updateUserById(id, {
+      ban_duration: "876000h", // ~100 years
+    });
 
-    res.json({ ok: true, deleted_user_id: id });
+    if (ban.error) return res.status(400).json({ error: ban.error.message });
+
+    res.json({ ok: true, disabled_user_id: id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
