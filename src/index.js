@@ -555,18 +555,17 @@ app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async
 app.get("/proposals", requireAuth, async (req, res) => {
   const status = req.query.status;
 
-  let q = supabaseAdmin.from("proposals").select("*").order("created_at", {
-    ascending: false,
-  });
+  let q = supabaseAdmin
+    .from("proposals")
+    .select("*")
+    .order("created_at", { ascending: false });
 
-  if (req.user.role === "student") q = q.eq("status", "approved");
-
-  // officer sees own only
-  if (req.user.role === "officer") q = q.eq("created_by", req.user.id);
-
-  // dean/president see all (optional status filter)
-  if ((req.user.role === "dean" || req.user.role === "president") && status) {
-    q = q.eq("status", status);
+  // Students still see approved only
+  if (req.user.role === "student") {
+    q = q.eq("status", "approved");
+  } else {
+    // Officer/President/Dean can optionally filter by status
+    if (status) q = q.eq("status", status);
   }
 
   const { data, error } = await q;
