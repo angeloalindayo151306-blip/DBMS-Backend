@@ -289,6 +289,214 @@ app.post("/accounts/officers", requireAuth, requireRole("dean", "president"), as
 });
 
 /**
+ * LIST ACCOUNTS
+ * - Dean: can see all roles
+ * - President: can see student + officer only
+ * Returns profiles + email (email fetched from Supabase Auth)
+ */
+app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, res) => {
+  try {
+    const roleFilter = (req.query.role || "").toString(); // optional: student/officer/dean/president
+    const qText = (req.query.q || "").toString().trim();  // optional: search string
+
+    let q = supabaseAdmin
+      .from("profiles")
+      .select(`
+        id,
+        role,
+        full_name,
+        first_name,
+        middle_name,
+        last_name,
+        officer_title,
+        date_of_birth,
+        age,
+        address,
+        mobile_number,
+        course,
+        year_level,
+        created_by
+      `)
+      .order("full_name", { ascending: true });
+
+    // President can only view student + officer
+    if (req.user.role === "president") {
+      q = q.in("role", ["student", "officer"]);
+    }
+
+    // Optional server-side role filter
+    if (roleFilter && roleFilter !== "all") {
+      // Prevent president from requesting dean/president
+      if (req.user.role === "president" && !["student", "officer"].includes(roleFilter)) {
+        return res.status(403).json({ error: "Not allowed to view this role." });
+      }
+      q = q.eq("role", roleFilter);
+    }
+
+    // Optional server-side search (matches full_name)
+    if (qText) {
+      q = q.ilike("full_name", `%${qText}%`);
+    }
+
+    const { data: profiles, error } = await q;
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Attach emails from Supabase Auth (since profiles table may not store email)
+    const withEmail = await Promise.all(
+      (profiles || []).map(async (p) => {
+        const r = await supabaseAdmin.auth.admin.getUserById(p.id);
+        return {
+          ...p,
+          email: r?.data?.user?.email ?? null,
+        };
+      })
+    );
+
+    res.json(withEmail);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * UPDATE ACCOUNT (profile + optional password reset)
+ * - Dean: can edit anyone
+ * - President: can edit student + officer only
+ * - Prevent president from setting officer_title = "President"
+ */
+app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
+  const TargetRoleEnum = z.enum(["student", "officer", "president", "dean"]);
+
+  const patchSchema = z.object({
+    first_name: z.string().min(1).optional(),
+    middle_name: z.string().nullable().optional(),
+    last_name: z.string().min(1).optional(),
+
+    date_of_birth: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+    address: z.string().min(3).nullable().optional(),
+    mobile_number: z.string().min(7).nullable().optional(),
+
+    course: z.union([CourseEnum, z.null()]).optional(),
+    year_level: z.union([z.number().int().min(1).max(5), z.null()]).optional(),
+
+    officer_title: z.union([OfficerTitleEnum, z.null()]).optional(),
+
+    // Optional password reset (requires service role / admin already used)
+    new_password: z.string().min(6).optional(),
+  });
+
+  const body = patchSchema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  try {
+    const id = req.params.id;
+
+    // Load target profile (needed for permission + recomputing full_name/age)
+    const current = await supabaseAdmin
+      .from("profiles")
+      .select(`
+        id, role,
+        first_name, middle_name, last_name,
+        date_of_birth,
+        officer_title
+      `)
+      .eq("id", id)
+      .single();
+
+    if (current.error) return res.status(400).json({ error: current.error.message });
+
+    const targetRole = current.data.role;
+
+    // Permission: President can only edit student/officer
+    if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
+      return res.status(403).json({ error: "President can only edit Student and Officer accounts." });
+    }
+
+    // Prevent president from setting President title
+    if (req.user.role === "president" && body.data.officer_title === "President") {
+      return res.status(403).json({ error: "President cannot set officer_title to President." });
+    }
+
+    // Build update payload (profiles table)
+    const updatePayload = { ...body.data };
+    delete updatePayload.new_password; // not a profiles column
+
+    // Recompute full_name if any name part changed
+    const nextName = {
+      first_name: body.data.first_name ?? current.data.first_name,
+      middle_name:
+        body.data.middle_name !== undefined ? body.data.middle_name : current.data.middle_name,
+      last_name: body.data.last_name ?? current.data.last_name,
+    };
+
+    if (
+      body.data.first_name !== undefined ||
+      body.data.middle_name !== undefined ||
+      body.data.last_name !== undefined
+    ) {
+      updatePayload.full_name = buildFullName(nextName);
+    }
+
+    // Recompute age if date_of_birth changed
+    const nextDob =
+      body.data.date_of_birth !== undefined ? body.data.date_of_birth : current.data.date_of_birth;
+
+    if (body.data.date_of_birth !== undefined) {
+      updatePayload.age = calcAge(nextDob);
+    }
+
+    // Handle officer_title ↔ role consistency (Dean-only promotion/demotion)
+    if (body.data.officer_title !== undefined) {
+      const newTitle = body.data.officer_title;
+
+      // If set to President => only dean allowed, and role becomes 'president'
+      if (newTitle === "President") {
+        if (req.user.role !== "dean") {
+          return res.status(403).json({ error: "Only Dean can assign President officer_title." });
+        }
+        updatePayload.role = "president";
+      }
+
+      // If target was president and title changed away from President => demote to officer
+      if (targetRole === "president" && newTitle && newTitle !== "President") {
+        if (req.user.role !== "dean") {
+          return res.status(403).json({ error: "Only Dean can modify President account title/role." });
+        }
+        updatePayload.role = "officer";
+      }
+    }
+
+    // Update profile
+    const updated = await supabaseAdmin
+      .from("profiles")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("*")
+      .single();
+
+    if (updated.error) return res.status(400).json({ error: updated.error.message });
+
+    // Optional password reset
+    if (body.data.new_password) {
+      const pw = await supabaseAdmin.auth.admin.updateUserById(id, {
+        password: body.data.new_password,
+      });
+      if (pw.error) return res.status(400).json({ error: pw.error.message });
+    }
+
+    // Attach email for convenience
+    const authUser = await supabaseAdmin.auth.admin.getUserById(id);
+
+    res.json({
+      ...updated.data,
+      email: authUser?.data?.user?.email ?? null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
  * PROPOSALS
  */
 app.get("/proposals", requireAuth, async (req, res) => {
