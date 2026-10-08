@@ -92,25 +92,8 @@ app.get("/health", (req, res) => res.json({ ok: true }));
  * Common
  */
 app.get("/me", requireAuth, async (req, res) => {
-  res.json({
-    id: req.user.id,
-    email: req.user.email ?? null,
-    role: req.user.role,
-    full_name: req.user.full_name,
-    officer_title: req.user.officer_title ?? null,
-
-    first_name: req.user.first_name ?? null,
-    middle_name: req.user.middle_name ?? null,
-    last_name: req.user.last_name ?? null,
-
-    date_of_birth: req.user.date_of_birth ?? null,
-    age: req.user.age ?? null,
-    address: req.user.address ?? null,
-    mobile_number: req.user.mobile_number ?? null,
-
-    course: req.user.course ?? null,
-    year_level: req.user.year_level ?? null,
-  });
+  // requireAuth already attaches profile + email
+  res.json(req.user);
 });
 
 /**
@@ -256,7 +239,6 @@ app.post(
       return res.status(403).json({ error: "President cannot create another President account." });
     }
 
-    // Only dean may create a President role (president creation already blocked above)
     const role = body.data.officer_title === "President" ? "president" : "officer";
 
     const full_name = buildFullName(body.data);
@@ -350,24 +332,22 @@ app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, 
     }
 
     // basic server-side name search
-    if (qText) {
-      q = q.ilike("full_name", `%${qText}%`);
-    }
+    if (qText) q = q.ilike("full_name", `%${qText}%`);
 
     const { data: profiles, error } = await q;
     if (error) return res.status(400).json({ error: error.message });
 
-    // Attach emails from Supabase Auth; hide accounts whose auth user was deleted
+    // attach email from auth
     const withEmail = await Promise.all(
       (profiles || []).map(async (p) => {
         const r = await supabaseAdmin.auth.admin.getUserById(p.id);
         const email = r?.data?.user?.email ?? null;
-        if (!email) return null; // treat missing auth user as deleted
+        // if auth user missing, still return profile (optional). You can hide by returning null instead.
         return { ...p, email };
       })
     );
 
-    res.json(withEmail.filter(Boolean));
+    res.json(withEmail);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -404,7 +384,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
   try {
     const id = req.params.id;
 
-    // Load target
     const current = await supabaseAdmin
       .from("profiles")
       .select(`
@@ -430,7 +409,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
       return res.status(403).json({ error: "President cannot set officer_title to President." });
     }
 
-    // Build profiles update payload
     const updatePayload = { ...body.data };
     delete updatePayload.new_password;
 
@@ -462,7 +440,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
     if (body.data.officer_title !== undefined) {
       const newTitle = body.data.officer_title;
 
-      // If set to President => only dean allowed, role becomes 'president'
       if (newTitle === "President") {
         if (req.user.role !== "dean") {
           return res.status(403).json({ error: "Only Dean can assign President officer_title." });
@@ -470,7 +447,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
         updatePayload.role = "president";
       }
 
-      // If target was president and title changed away from President (or cleared) => demote to officer (Dean only)
       if (targetRole === "president" && newTitle !== "President") {
         if (req.user.role !== "dean") {
           return res.status(403).json({ error: "Only Dean can modify President account title/role." });
@@ -479,7 +455,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
       }
     }
 
-    // Update profiles row
     const updated = await supabaseAdmin
       .from("profiles")
       .update(updatePayload)
@@ -489,7 +464,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 
     if (updated.error) return res.status(400).json({ error: updated.error.message });
 
-    // Optional password reset
     if (body.data.new_password) {
       const pw = await supabaseAdmin.auth.admin.updateUserById(id, {
         password: body.data.new_password,
@@ -497,7 +471,6 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
       if (pw.error) return res.status(400).json({ error: pw.error.message });
     }
 
-    // Attach email for convenience
     const authUser = await supabaseAdmin.auth.admin.getUserById(id);
 
     res.json({
@@ -510,18 +483,22 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 });
 
 /**
- * DELETE ACCOUNT (SAFE = disable login)
- * - Disables Supabase Auth user (ban) so they cannot login
- * - Keeps profiles row + history intact
+ * DELETE ACCOUNT (HARD DELETE)
+ * WARNING: This deletes proposals/payments/receipts related to this user.
+ * Permissions:
+ * - Dean: can delete anyone
+ * - President: can delete student/officer only
+ * - Cannot delete self
  */
 app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
   try {
     const id = req.params.id;
 
     if (id === req.user.id) {
-      return res.status(400).json({ error: "You cannot disable your own account." });
+      return res.status(400).json({ error: "You cannot delete your own account." });
     }
 
+    // load target role
     const target = await supabaseAdmin
       .from("profiles")
       .select("id, role")
@@ -533,17 +510,82 @@ app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async
     const targetRole = target.data.role;
 
     if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
-      return res.status(403).json({ error: "President can only disable Student and Officer accounts." });
+      return res.status(403).json({ error: "President can only delete Student and Officer accounts." });
     }
 
-    // Disable login for a very long time (acts like deactivation)
-    const ban = await supabaseAdmin.auth.admin.updateUserById(id, {
-      ban_duration: "876000h", // ~100 years
+    const chunk = (arr, size = 100) => {
+      const out = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
+    };
+
+    // Null out references that can block delete
+    // (if you have FK constraints pointing to profiles.id)
+    await supabaseAdmin.from("profiles").update({ created_by: null }).eq("created_by", id);
+    await supabaseAdmin.from("proposals").update({ reviewed_by: null }).eq("reviewed_by", id);
+
+    // proposals created by this user
+    const pr = await supabaseAdmin.from("proposals").select("id").eq("created_by", id);
+    if (pr.error) return res.status(400).json({ error: pr.error.message });
+    const proposalIds = (pr.data || []).map((r) => r.id);
+
+    // payments to delete:
+    // - payments made by this user
+    // - payments under proposals created by this user (deletes other students' payments too)
+    const payIds = new Set();
+
+    const p1 = await supabaseAdmin.from("payments").select("id").eq("student_id", id);
+    if (p1.error) return res.status(400).json({ error: p1.error.message });
+    for (const r of p1.data || []) payIds.add(r.id);
+
+    if (proposalIds.length) {
+      for (const group of chunk(proposalIds, 100)) {
+        const p2 = await supabaseAdmin.from("payments").select("id").in("proposal_id", group);
+        if (p2.error) return res.status(400).json({ error: p2.error.message });
+        for (const r of p2.data || []) payIds.add(r.id);
+      }
+    }
+
+    const paymentIds = Array.from(payIds);
+
+    // delete receipts first
+    if (paymentIds.length) {
+      for (const group of chunk(paymentIds, 100)) {
+        const delRc = await supabaseAdmin.from("receipts").delete().in("payment_id", group);
+        if (delRc.error) return res.status(400).json({ error: delRc.error.message });
+      }
+    }
+
+    // delete payments
+    if (paymentIds.length) {
+      for (const group of chunk(paymentIds, 100)) {
+        const delPay = await supabaseAdmin.from("payments").delete().in("id", group);
+        if (delPay.error) return res.status(400).json({ error: delPay.error.message });
+      }
+    }
+
+    // delete proposals
+    if (proposalIds.length) {
+      for (const group of chunk(proposalIds, 100)) {
+        const delPr = await supabaseAdmin.from("proposals").delete().in("id", group);
+        if (delPr.error) return res.status(400).json({ error: delPr.error.message });
+      }
+    }
+
+    // delete profile
+    const delProfile = await supabaseAdmin.from("profiles").delete().eq("id", id);
+    if (delProfile.error) return res.status(400).json({ error: delProfile.error.message });
+
+    // delete auth user last
+    const delAuth = await supabaseAdmin.auth.admin.deleteUser(id);
+    if (delAuth.error) return res.status(400).json({ error: delAuth.error.message });
+
+    res.json({
+      ok: true,
+      deleted_user_id: id,
+      deleted_payments: paymentIds.length,
+      deleted_proposals: proposalIds.length,
     });
-
-    if (ban.error) return res.status(400).json({ error: ban.error.message });
-
-    res.json({ ok: true, disabled_user_id: id });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -555,12 +597,9 @@ app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async
 app.get("/proposals", requireAuth, async (req, res) => {
   const status = req.query.status;
 
-  let q = supabaseAdmin
-    .from("proposals")
-    .select("*")
-    .order("created_at", { ascending: false });
+  let q = supabaseAdmin.from("proposals").select("*").order("created_at", { ascending: false });
 
-  // Students still see approved only
+  // Students see approved only
   if (req.user.role === "student") {
     q = q.eq("status", "approved");
   } else {
@@ -569,7 +608,6 @@ app.get("/proposals", requireAuth, async (req, res) => {
   }
 
   const { data, error } = await q;
-
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
 });
@@ -592,10 +630,7 @@ app.post("/proposals", requireAuth, requireRole("officer", "president"), async (
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
-  const requiredPerStudent = body.data.breakdown.reduce(
-    (sum, it) => sum + Number(it.amount || 0),
-    0
-  );
+  const requiredPerStudent = body.data.breakdown.reduce((sum, it) => sum + Number(it.amount || 0), 0);
 
   const { data, error } = await supabaseAdmin
     .from("proposals")
@@ -640,18 +675,13 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer", "president"), as
     .single();
 
   if (current.error) return res.status(400).json({ error: current.error.message });
-  if (current.data.created_by !== req.user.id)
-    return res.status(403).json({ error: "Not your proposal" });
-  if (current.data.status !== "pending")
-    return res.status(400).json({ error: "Only pending proposals can be edited" });
+  if (current.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
+  if (current.data.status !== "pending") return res.status(400).json({ error: "Only pending proposals can be edited" });
 
   const updatePayload = { ...body.data };
 
   if (body.data.breakdown) {
-    const requiredPerStudent = body.data.breakdown.reduce(
-      (sum, it) => sum + Number(it.amount || 0),
-      0
-    );
+    const requiredPerStudent = body.data.breakdown.reduce((sum, it) => sum + Number(it.amount || 0), 0);
     updatePayload.required_per_student = requiredPerStudent;
     updatePayload.budget_total = requiredPerStudent;
   }
@@ -730,8 +760,7 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
     .single();
 
   if (proposal.error) return res.status(400).json({ error: proposal.error.message });
-  if (proposal.data.status !== "approved")
-    return res.status(400).json({ error: "Event not available (not approved)" });
+  if (proposal.data.status !== "approved") return res.status(400).json({ error: "Event not available (not approved)" });
 
   const required = toNum(proposal.data.required_per_student);
 
@@ -797,12 +826,7 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 
 /**
  * Officer/President: view payments for a proposal
- * - Officer: only own proposals
- * - President: can view any proposal payments
- */
-/**
- * Officer/President: view payments for a proposal
- * UPDATED RULE: Officer can view ANY proposal payments (same as President)
+ * UPDATED: Officer can view ANY proposal payments
  */
 app.get(
   "/officer/proposals/:id/payments",
