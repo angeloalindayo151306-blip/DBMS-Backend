@@ -549,6 +549,42 @@ app.delete(
   }
 );
 
+app.patch(
+  "/accounts/:id/enable",
+  requireAuth,
+  requireRole("dean", "president"),
+  async (req, res) => {
+    try {
+      const id = req.params.id;
+
+      // same permission logic as delete/disable
+      const target = await supabaseAdmin
+        .from("profiles")
+        .select("id, role")
+        .eq("id", id)
+        .single();
+
+      if (target.error) return res.status(400).json({ error: target.error.message });
+
+      const targetRole = target.data.role;
+
+      if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
+        return res.status(403).json({ error: "President can only enable Student and Officer accounts." });
+      }
+
+      const unban = await supabaseAdmin.auth.admin.updateUserById(id, {
+        ban_duration: "none",
+      });
+
+      if (unban.error) return res.status(400).json({ error: unban.error.message });
+
+      res.json({ ok: true, enabled_user_id: id });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
 /**
  * PROPOSALS
  */
