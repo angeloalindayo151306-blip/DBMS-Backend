@@ -831,16 +831,29 @@ app.get(
   requireRole("officer", "president"),
   async (req, res) => {
     const { data, error } = await supabaseAdmin
-      .from("payments")
-      .select(`
-        id, proposal_id, student_id, amount, method, reference_no, paid_at,
-        receipts ( receipt_no ),
-        student:profiles!payments_student_id_fkey (
-          id, full_name, first_name, middle_name, last_name, course, year_level
-        )
-      `)
-      .eq("proposal_id", req.params.id)
-      .order("paid_at", { ascending: false });
+  .from("payments")
+  .select(`
+    id,
+    proposal_id,
+    student_id,
+    amount,
+    method,
+    reference_no,
+    paid_at,
+    receipts(*),
+    student:profiles (
+      id,
+      ccs_id_no,
+      first_name,
+      middle_name,
+      last_name,
+      full_name,
+      course,
+      year_level
+    )
+  `)
+  .eq("proposal_id", proposalId)
+  .order("paid_at", { ascending: false });
 
     if (error) return res.status(400).json({ error: error.message });
     res.json(data);
