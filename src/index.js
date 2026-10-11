@@ -778,39 +778,44 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 /**
  * Officer/President: proposal payments (includes student.ccs_id_no)
  */
-app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer", "president"), async (req, res) => {
-  const proposalId = req.params.id;
+app.get(
+  "/officer/proposals/:id/payments",
+  requireAuth,
+  requireRole("officer", "president", "dean"),
+  async (req, res) => {
+    const proposalId = req.params.id;
 
-  const { data, error } = await supabaseAdmin
-    .from("payments")
-    .select(
-      `
-      id,
-      proposal_id,
-      student_id,
-      amount,
-      method,
-      reference_no,
-      paid_at,
-      receipts(*),
-      student:profiles (
+    const { data, error } = await supabaseAdmin
+      .from("payments")
+      .select(
+        `
         id,
-        ccs_id_no,
-        first_name,
-        middle_name,
-        last_name,
-        full_name,
-        course,
-        year_level
+        proposal_id,
+        student_id,
+        amount,
+        method,
+        reference_no,
+        paid_at,
+        receipts(*),
+        student:profiles (
+          id,
+          ccs_id_no,
+          first_name,
+          middle_name,
+          last_name,
+          full_name,
+          course,
+          year_level
+        )
+      `
       )
-    `
-    )
-    .eq("proposal_id", proposalId)
-    .order("paid_at", { ascending: false });
+      .eq("proposal_id", proposalId)
+      .order("paid_at", { ascending: false });
 
-  if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
-});
+    if (error) return res.status(400).json({ error: error.message });
+    res.json(data);
+  }
+);
 
 
 // =======================================================
