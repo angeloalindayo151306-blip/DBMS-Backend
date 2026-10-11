@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import multer from "multer";
 import { z } from "zod";
 import { supabaseAdmin } from "./supabase.js";
 import { requireAuth, requireRole } from "./auth.js";
@@ -41,12 +42,38 @@ app.use(express.json());
 const toNum = (v) => (v === null || v === undefined ? 0 : Number(v));
 
 /**
+ * Upload (receipt image) - Option 1 (multer)
+ */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const ok =
+      file.mimetype === "image/jpeg" ||
+      file.mimetype === "image/png" ||
+      file.mimetype === "image/webp";
+    if (!ok) return cb(new Error("Only JPG/PNG/WEBP images are allowed."));
+    cb(null, true);
+  },
+});
+
+// Multer error handler (so errors return JSON)
+app.use((err, req, res, next) => {
+  if (err?.message?.includes("Only JPG/PNG/WEBP")) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (err?.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({ error: "File too large. Max 5MB." });
+  }
+  next(err);
+});
+
+/**
  * Profile helpers/schema
  */
 const CourseEnum = z.enum(["IT", "CS"]);
 
 function buildFullName({ first_name, middle_name, last_name }) {
-  // IMPORTANT: join by space (not newline)
   return [first_name, middle_name, last_name].filter(Boolean).join(" ").trim();
 }
 
@@ -93,18 +120,11 @@ app.get("/health", (req, res) => res.json({ ok: true }));
  * Common
  */
 app.get("/me", requireAuth, async (req, res) => {
-  // requireAuth attaches profile + email to req.user
   res.json(req.user);
 });
 
 /**
- * ACCOUNTS RULES
- * - Dean can create: Dean, Student, Officer, President
- * - President can create: Student, Officer (NOT Dean, NOT President)
- */
-
-/**
- * Dean-only: create Dean account
+ * ACCOUNTS
  */
 app.post("/accounts/deans", requireAuth, requireRole("dean"), async (req, res) => {
   const schema = z
@@ -127,7 +147,6 @@ app.post("/accounts/deans", requireAuth, requireRole("dean"), async (req, res) =
   });
 
   if (created.error) return res.status(400).json({ error: created.error.message });
-
   const userId = created.data.user.id;
 
   const prof = await supabaseAdmin.from("profiles").upsert(
@@ -157,9 +176,6 @@ app.post("/accounts/deans", requireAuth, requireRole("dean"), async (req, res) =
   res.json({ id: userId, email: body.data.email, role: "dean", full_name });
 });
 
-/**
- * Dean/President: create Student account
- */
 app.post("/accounts/students", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const schema = z
     .object({
@@ -181,7 +197,6 @@ app.post("/accounts/students", requireAuth, requireRole("dean", "president"), as
   });
 
   if (created.error) return res.status(400).json({ error: created.error.message });
-
   const userId = created.data.user.id;
 
   const prof = await supabaseAdmin.from("profiles").upsert(
@@ -211,10 +226,6 @@ app.post("/accounts/students", requireAuth, requireRole("dean", "president"), as
   res.json({ id: userId, email: body.data.email, role: "student", full_name });
 });
 
-/**
- * Dean/President: create Officer accounts
- * - If officer_title === "President" => role = "president" BUT ONLY DEAN can do that
- */
 app.post("/accounts/officers", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const schema = z
     .object({
@@ -227,7 +238,6 @@ app.post("/accounts/officers", requireAuth, requireRole("dean", "president"), as
   const body = schema.safeParse(req.body);
   if (!body.success) return res.status(400).json(body.error);
 
-  // BLOCK: President cannot create President accounts
   if (req.user.role === "president" && body.data.officer_title === "President") {
     return res.status(403).json({ error: "President cannot create another President account." });
   }
@@ -244,7 +254,6 @@ app.post("/accounts/officers", requireAuth, requireRole("dean", "president"), as
   });
 
   if (created.error) return res.status(400).json({ error: created.error.message });
-
   const userId = created.data.user.id;
 
   const prof = await supabaseAdmin.from("profiles").upsert(
@@ -313,7 +322,6 @@ app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, 
       )
       .order("full_name", { ascending: true });
 
-    // President sees only student + officer
     if (req.user.role === "president") {
       q = q.in("role", ["student", "officer"]);
     }
@@ -330,7 +338,6 @@ app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, 
     const { data: profiles, error } = await q;
     if (error) return res.status(400).json({ error: error.message });
 
-    // Attach emails from Supabase Auth and filter out banned users by default
     const withEmail = await Promise.all(
       (profiles || []).map(async (p) => {
         const r = await supabaseAdmin.auth.admin.getUserById(p.id);
@@ -358,7 +365,7 @@ app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, 
 });
 
 /**
- * UPDATE ACCOUNT (profile + optional password reset)
+ * UPDATE ACCOUNT
  */
 app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const patchSchema = z.object({
@@ -465,7 +472,7 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 });
 
 /**
- * DELETE ACCOUNT (BAN/DISABLE ONLY)
+ * DISABLE / ENABLE
  */
 app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
   try {
@@ -538,9 +545,6 @@ app.get("/proposals", requireAuth, async (req, res) => {
   res.json(data);
 });
 
-/**
- * Officer/President: create proposal with breakdown
- */
 app.post("/proposals", requireAuth, requireRole("officer", "president"), async (req, res) => {
   const itemSchema = z.object({
     name: z.string().min(1),
@@ -576,9 +580,6 @@ app.post("/proposals", requireAuth, requireRole("officer", "president"), async (
   res.json(data);
 });
 
-/**
- * Officer/President: edit own proposal ONLY if pending
- */
 app.patch("/proposals/:id", requireAuth, requireRole("officer", "president"), async (req, res) => {
   const itemSchema = z.object({
     name: z.string().min(1),
@@ -623,9 +624,6 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer", "president"), as
   res.json(data);
 });
 
-/**
- * Dean: approve / reject proposal
- */
 app.patch("/proposals/:id/status", requireAuth, requireRole("dean"), async (req, res) => {
   const schema = z.object({
     status: z.enum(["approved", "rejected"]),
@@ -652,7 +650,7 @@ app.patch("/proposals/:id/status", requireAuth, requireRole("dean"), async (req,
 });
 
 /**
- * EVENTS (for students): approved proposals
+ * EVENTS (students)
  */
 app.get("/events", requireAuth, async (req, res) => {
   const { data, error } = await supabaseAdmin
@@ -736,9 +734,6 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
   res.json({ payment: payment.data, receipt: receipt.data });
 });
 
-/**
- * Student: payment history + receipts
- */
 app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from("payments")
@@ -751,7 +746,7 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 });
 
 /**
- * Officer/President: view payments for a proposal (includes student.ccs_id_no)
+ * Officer/President: proposal payments (includes student.ccs_id_no)
  */
 app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer", "president"), async (req, res) => {
   const proposalId = req.params.id;
@@ -787,16 +782,238 @@ app.get("/officer/proposals/:id/payments", requireAuth, requireRole("officer", "
   res.json(data);
 });
 
+
+// =======================================================
+// EXPENSES (NEW MODULE) - record-only + receipt + dean approval
+// =======================================================
+
 /**
- * REPORTS
- * Budget meaning (UPDATED):
- * - expected total collection from ALL students (role='student')
- * - expected_total = required_per_student * student_count
- * - remaining_budget = max(expected_total - collected_total, 0)
- * - Only APPROVED proposals are treated as collectible events
+ * Create expense (Officer/President)
+ * record-only: no edit/delete endpoints
+ */
+app.post("/expenses", requireAuth, requireRole("officer", "president"), async (req, res) => {
+  const schema = z.object({
+    proposal_id: z.string().uuid().nullable().optional(),
+    item_name: z.string().min(2),
+    qty: z.number().int().positive().nullable().optional(),
+    amount: z.number().positive(),
+    spent_at: z.string().datetime().optional(), // optional
+    notes: z.string().nullable().optional(),
+  });
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const { data, error } = await supabaseAdmin
+    .from("expenses")
+    .insert({
+      proposal_id: body.data.proposal_id ?? null,
+      spent_by: req.user.id,
+      item_name: body.data.item_name,
+      qty: body.data.qty ?? null,
+      amount: body.data.amount,
+      spent_at: body.data.spent_at ?? new Date().toISOString(),
+      notes: body.data.notes ?? null,
+      status: "pending",
+    })
+    .select("*")
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+
+/**
+ * Upload receipt image (Officer/President)
+ * - only the creator (spent_by) can upload
+ * - only allowed while status is pending
+ */
+app.post(
+  "/expenses/:id/receipt",
+  requireAuth,
+  requireRole("officer", "president"),
+  upload.single("receipt"),
+  async (req, res) => {
+    try {
+      const expenseId = req.params.id;
+
+      if (!req.file) return res.status(400).json({ error: "Missing receipt file (field name: receipt)" });
+
+      const exp = await supabaseAdmin
+        .from("expenses")
+        .select("id, spent_by, status")
+        .eq("id", expenseId)
+        .single();
+
+      if (exp.error) return res.status(400).json({ error: exp.error.message });
+      if (!exp.data) return res.status(404).json({ error: "Expense not found" });
+
+      if (String(exp.data.spent_by) !== String(req.user.id)) {
+        return res.status(403).json({ error: "Only the expense creator can upload the receipt." });
+      }
+
+      if (exp.data.status !== "pending") {
+        return res.status(400).json({ error: "Receipt upload is only allowed while expense is pending." });
+      }
+
+      const ext =
+        req.file.mimetype === "image/png" ? "png" :
+        req.file.mimetype === "image/webp" ? "webp" : "jpg";
+
+      const path = `${expenseId}/${Date.now()}.${ext}`;
+
+      const up = await supabaseAdmin.storage
+        .from("expense-receipts")
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: true,
+        });
+
+      if (up.error) return res.status(400).json({ error: up.error.message });
+
+      const updated = await supabaseAdmin
+        .from("expenses")
+        .update({ receipt_path: path })
+        .eq("id", expenseId)
+        .select("*")
+        .single();
+
+      if (updated.error) return res.status(400).json({ error: updated.error.message });
+
+      res.json({ ok: true, expense: updated.data });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+/**
+ * List expenses (Officer/President/Dean)
+ * Supports filters:
+ * - ?proposal_id=UUID   (optional)
+ * - ?status=pending|approved|rejected (optional)
+ */
+app.get("/expenses", requireAuth, requireRole("officer", "president", "dean"), async (req, res) => {
+  try {
+    const proposal_id = (req.query.proposal_id || "").toString().trim();
+    const status = (req.query.status || "").toString().trim();
+
+    let q = supabaseAdmin.from("expenses").select("*").order("spent_at", { ascending: false });
+
+    if (proposal_id) q = q.eq("proposal_id", proposal_id);
+    if (status) q = q.eq("status", status);
+
+    const { data, error } = await q;
+    if (error) return res.status(400).json({ error: error.message });
+
+    // Attach spender/reviewer/proposal info (without relying on ambiguous embedded joins)
+    const rows = data || [];
+
+    const spenderIds = [...new Set(rows.map((r) => r.spent_by).filter(Boolean))];
+    const reviewerIds = [...new Set(rows.map((r) => r.reviewed_by).filter(Boolean))];
+    const proposalIds = [...new Set(rows.map((r) => r.proposal_id).filter(Boolean))];
+
+    const profilesMap = new Map();
+    if (spenderIds.length || reviewerIds.length) {
+      const allIds = [...new Set([...spenderIds, ...reviewerIds])];
+      const prof = await supabaseAdmin
+        .from("profiles")
+        .select("id, ccs_id_no, role, full_name, officer_title, first_name, middle_name, last_name")
+        .in("id", allIds);
+
+      if (!prof.error) {
+        for (const p of prof.data || []) profilesMap.set(p.id, p);
+      }
+    }
+
+    const proposalsMap = new Map();
+    if (proposalIds.length) {
+      const prs = await supabaseAdmin.from("proposals").select("id, title, status").in("id", proposalIds);
+      if (!prs.error) {
+        for (const p of prs.data || []) proposalsMap.set(p.id, p);
+      }
+    }
+
+    const out = rows.map((r) => ({
+      ...r,
+      spender: profilesMap.get(r.spent_by) || null,
+      reviewer: r.reviewed_by ? profilesMap.get(r.reviewed_by) || null : null,
+      proposal: r.proposal_id ? proposalsMap.get(r.proposal_id) || null : null,
+    }));
+
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Dean approves/rejects expense
+ */
+app.patch("/expenses/:id/status", requireAuth, requireRole("dean"), async (req, res) => {
+  const schema = z.object({
+    status: z.enum(["approved", "rejected"]),
+    dean_comment: z.string().optional(),
+  });
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const expenseId = req.params.id;
+
+  const { data, error } = await supabaseAdmin
+    .from("expenses")
+    .update({
+      status: body.data.status,
+      dean_comment: body.data.dean_comment ?? null,
+      reviewed_by: req.user.id,
+      reviewed_at: new Date().toISOString(),
+    })
+    .eq("id", expenseId)
+    .select("*")
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+
+/**
+ * Get signed URL for receipt
+ */
+app.get("/expenses/:id/receipt-url", requireAuth, requireRole("officer", "president", "dean"), async (req, res) => {
+  const expenseId = req.params.id;
+
+  const exp = await supabaseAdmin.from("expenses").select("id, receipt_path").eq("id", expenseId).single();
+  if (exp.error) return res.status(400).json({ error: exp.error.message });
+  if (!exp.data) return res.status(404).json({ error: "Expense not found" });
+
+  if (!exp.data.receipt_path) {
+    return res.json({ signedUrl: null });
+  }
+
+  const signed = await supabaseAdmin.storage
+    .from("expense-receipts")
+    .createSignedUrl(exp.data.receipt_path, 60 * 30); // 30 minutes
+
+  if (signed.error) return res.status(400).json({ error: signed.error.message });
+  res.json({ signedUrl: signed.data.signedUrl });
+});
+
+
+// =======================================================
+// REPORTS (UPDATED to include spending + net)
+// =======================================================
+
+/**
+ * Department report per event
+ * - student_count based on profiles.role='student'
+ * - expected_total = required_per_student * student_count  (approved only)
+ * - outstanding = expected_total - collected_total
+ * - spent_total = sum(approved expenses with proposal_id)
+ * - net_total = collected_total - spent_total
  */
 app.get("/reports/department", requireAuth, requireRole("dean", "president"), async (req, res) => {
-  // 1) Count students (role = student)
+  // Count students
   const studentCountRes = await supabaseAdmin
     .from("profiles")
     .select("id", { count: "exact", head: true })
@@ -805,53 +1022,134 @@ app.get("/reports/department", requireAuth, requireRole("dean", "president"), as
   if (studentCountRes.error) {
     return res.status(400).json({ error: studentCountRes.error.message });
   }
-
   const student_count = studentCountRes.count || 0;
 
-  // 2) Load proposals
+  // Proposals (include breakdown for details panel)
   const proposals = await supabaseAdmin
     .from("proposals")
-    .select("id, title, status, budget_total, required_per_student");
+    .select("id, title, status, description, breakdown, required_per_student, created_at, created_by, reviewed_at, reviewed_by, dean_comment")
+    .order("created_at", { ascending: false });
 
-  if (proposals.error) {
-    return res.status(400).json({ error: proposals.error.message });
-  }
+  if (proposals.error) return res.status(400).json({ error: proposals.error.message });
 
-  // 3) Load payments
+  // Payments
   const payments = await supabaseAdmin.from("payments").select("proposal_id, amount");
-  if (payments.error) {
-    return res.status(400).json({ error: payments.error.message });
-  }
+  if (payments.error) return res.status(400).json({ error: payments.error.message });
 
   const collectedByProposal = new Map();
   for (const p of payments.data || []) {
-    const k = p.proposal_id;
-    collectedByProposal.set(k, (collectedByProposal.get(k) || 0) + toNum(p.amount));
+    collectedByProposal.set(p.proposal_id, (collectedByProposal.get(p.proposal_id) || 0) + toNum(p.amount));
   }
 
-  // 4) Build report rows
+  // Approved expenses per proposal
+  const exp = await supabaseAdmin
+    .from("expenses")
+    .select("proposal_id, amount, status")
+    .eq("status", "approved");
+
+  if (exp.error) return res.status(400).json({ error: exp.error.message });
+
+  const spentByProposal = new Map();
+  let generalSpentApproved = 0;
+
+  for (const e of exp.data || []) {
+    const amt = toNum(e.amount);
+    if (e.proposal_id) {
+      spentByProposal.set(e.proposal_id, (spentByProposal.get(e.proposal_id) || 0) + amt);
+    } else {
+      generalSpentApproved += amt;
+    }
+  }
+
   const rows = (proposals.data || []).map((pr) => {
-    const collected = collectedByProposal.get(pr.id) || 0;
+    const collected_total = collectedByProposal.get(pr.id) || 0;
 
-    // per-student amount (prefer required_per_student; fallback to budget_total)
-    const perStudent = toNum(pr.required_per_student || pr.budget_total);
+    const fee_per_student = toNum(pr.required_per_student);
+    const expected_total = pr.status === "approved" ? fee_per_student * student_count : 0;
+    const remaining_budget = Math.max(expected_total - collected_total, 0);
 
-    // Only approved proposals are collectible events
-    const expectedTotal = pr.status === "approved" ? perStudent * student_count : 0;
+    const spent_total = spentByProposal.get(pr.id) || 0;
+    const net_total = collected_total - spent_total;
 
     return {
       proposal_id: pr.id,
       title: pr.title,
       status: pr.status,
+      description: pr.description,
+      breakdown: pr.breakdown,
+      created_at: pr.created_at,
+      created_by: pr.created_by,
+      reviewed_at: pr.reviewed_at,
+      reviewed_by: pr.reviewed_by,
+      dean_comment: pr.dean_comment,
+
       student_count,
-      required_per_student: perStudent,
-      budget_total: expectedTotal,
-      collected_total: collected,
-      remaining_budget: Math.max(expectedTotal - collected, 0),
+
+      // naming clarity:
+      required_per_student: fee_per_student,
+
+      // keep these keys for your existing UI:
+      budget_total: expected_total,
+      collected_total,
+      remaining_budget,
+
+      // NEW fields:
+      spent_total,
+      net_total,
     };
   });
 
   res.json(rows);
+});
+
+/**
+ * Summary totals (ALL events) including general spending
+ * Useful for Dean dashboard cards.
+ */
+app.get("/reports/summary", requireAuth, requireRole("dean", "president"), async (req, res) => {
+  // Count students
+  const studentCountRes = await supabaseAdmin
+    .from("profiles")
+    .select("id", { count: "exact", head: true })
+    .eq("role", "student");
+
+  if (studentCountRes.error) return res.status(400).json({ error: studentCountRes.error.message });
+  const student_count = studentCountRes.count || 0;
+
+  const payments = await supabaseAdmin.from("payments").select("amount");
+  if (payments.error) return res.status(400).json({ error: payments.error.message });
+
+  const total_collected_all = (payments.data || []).reduce((s, r) => s + toNum(r.amount), 0);
+
+  const expensesApproved = await supabaseAdmin.from("expenses").select("proposal_id, amount, status").eq("status", "approved");
+  if (expensesApproved.error) return res.status(400).json({ error: expensesApproved.error.message });
+
+  let total_spent_event = 0;
+  let total_spent_general = 0;
+
+  for (const e of expensesApproved.data || []) {
+    if (e.proposal_id) total_spent_event += toNum(e.amount);
+    else total_spent_general += toNum(e.amount);
+  }
+
+  const cash_on_hand = total_collected_all - total_spent_event - total_spent_general;
+
+  // pending expenses count
+  const pendingExpensesRes = await supabaseAdmin
+    .from("expenses")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "pending");
+
+  const pending_expenses = pendingExpensesRes.count || 0;
+
+  res.json({
+    student_count,
+    total_collected_all,
+    total_spent_event,
+    total_spent_general,
+    cash_on_hand,
+    pending_expenses,
+  });
 });
 
 const PORT = process.env.PORT || 8080;
