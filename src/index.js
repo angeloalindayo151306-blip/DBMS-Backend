@@ -46,6 +46,7 @@ const toNum = (v) => (v === null || v === undefined ? 0 : Number(v));
 const CourseEnum = z.enum(["IT", "CS"]);
 
 function buildFullName({ first_name, middle_name, last_name }) {
+  // FIX: join with spaces (your draft had a newline)
   return [first_name, middle_name, last_name].filter(Boolean).join(" ").trim();
 }
 
@@ -236,7 +237,9 @@ app.post(
 
     // BLOCK: President cannot create President accounts
     if (req.user.role === "president" && body.data.officer_title === "President") {
-      return res.status(403).json({ error: "President cannot create another President account." });
+      return res
+        .status(403)
+        .json({ error: "President cannot create another President account." });
     }
 
     const role = body.data.officer_title === "President" ? "president" : "officer";
@@ -269,6 +272,7 @@ app.post(
         mobile_number: body.data.mobile_number,
         course: body.data.course,
         year_level: body.data.year_level,
+        created_by: req.user.id,
       },
       { onConflict: "id" }
     );
@@ -297,14 +301,15 @@ app.post(
  */
 app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, res) => {
   try {
-    const roleFilter = (req.query.role || "").toString(); // optional: student/officer/dean/president
-    const qText = (req.query.q || "").toString().trim();  // optional: search full_name
+    const roleFilter = (req.query.role || "").toString();
+    const qText = (req.query.q || "").toString().trim();
     const includeDisabled = String(req.query.include_disabled || "") === "true";
 
     let q = supabaseAdmin
       .from("profiles")
       .select(`
         id,
+        ccs_id_no,
         role,
         full_name,
         first_name,
@@ -368,9 +373,6 @@ app.get("/accounts", requireAuth, requireRole("dean", "president"), async (req, 
 
 /**
  * UPDATE ACCOUNT (profile + optional password reset)
- * - Dean: can edit anyone
- * - President: can edit student + officer only
- * - Prevent president from setting officer_title = "President"
  */
 app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
   const patchSchema = z.object({
@@ -399,12 +401,7 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 
     const current = await supabaseAdmin
       .from("profiles")
-      .select(`
-        id, role,
-        first_name, middle_name, last_name,
-        date_of_birth,
-        officer_title
-      `)
+      .select(`id, role, first_name, middle_name, last_name, date_of_birth, officer_title`)
       .eq("id", id)
       .single();
 
@@ -414,7 +411,9 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 
     // Permission: President can only edit student/officer
     if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
-      return res.status(403).json({ error: "President can only edit Student and Officer accounts." });
+      return res
+        .status(403)
+        .json({ error: "President can only edit Student and Officer accounts." });
     }
 
     // Prevent president from setting President title
@@ -462,7 +461,9 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 
       if (targetRole === "president" && newTitle !== "President") {
         if (req.user.role !== "dean") {
-          return res.status(403).json({ error: "Only Dean can modify President account title/role." });
+          return res
+            .status(403)
+            .json({ error: "Only Dean can modify President account title/role." });
         }
         updatePayload.role = "officer";
       }
@@ -497,57 +498,41 @@ app.patch("/accounts/:id", requireAuth, requireRole("dean", "president"), async 
 
 /**
  * DELETE ACCOUNT (BAN/DISABLE ONLY)
- * - Disables login (bans user)
- * - Keeps profile + history
- * - GET /accounts filters disabled users out by default
  */
-app.delete(
-  "/accounts/:id",
-  requireAuth,
-  requireRole("dean", "president"),
-  async (req, res) => {
-    try {
-      const id = req.params.id;
+app.delete("/accounts/:id", requireAuth, requireRole("dean", "president"), async (req, res) => {
+  try {
+    const id = req.params.id;
 
-      // block self-disable
-      if (id === req.user.id) {
-        return res.status(400).json({ error: "You cannot disable your own account." });
-      }
-
-      // load target role for permission checks
-      const target = await supabaseAdmin
-        .from("profiles")
-        .select("id, role")
-        .eq("id", id)
-        .single();
-
-      if (target.error) return res.status(400).json({ error: target.error.message });
-
-      const targetRole = target.data.role;
-
-      // President can only disable Student + Officer
-      if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
-        return res.status(403).json({
-          error: "President can only disable Student and Officer accounts.",
-        });
-      }
-
-      const ban = await supabaseAdmin.auth.admin.updateUserById(id, {
-        ban_duration: "876000h", // ~100 years
-      });
-
-      if (ban.error) return res.status(400).json({ error: ban.error.message });
-
-      res.json({
-        ok: true,
-        disabled_user_id: id,
-        banned_until: ban.data?.user?.banned_until ?? null,
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
+    if (id === req.user.id) {
+      return res.status(400).json({ error: "You cannot disable your own account." });
     }
+
+    const target = await supabaseAdmin.from("profiles").select("id, role").eq("id", id).single();
+    if (target.error) return res.status(400).json({ error: target.error.message });
+
+    const targetRole = target.data.role;
+
+    if (req.user.role === "president" && !["student", "officer"].includes(targetRole)) {
+      return res.status(403).json({
+        error: "President can only disable Student and Officer accounts.",
+      });
+    }
+
+    const ban = await supabaseAdmin.auth.admin.updateUserById(id, {
+      ban_duration: "876000h", // ~100 years
+    });
+
+    if (ban.error) return res.status(400).json({ error: ban.error.message });
+
+    res.json({
+      ok: true,
+      disabled_user_id: id,
+      banned_until: ban.data?.user?.banned_until ?? null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-);
+});
 
 app.patch(
   "/accounts/:id/enable",
@@ -557,13 +542,7 @@ app.patch(
     try {
       const id = req.params.id;
 
-      // same permission logic as delete/disable
-      const target = await supabaseAdmin
-        .from("profiles")
-        .select("id, role")
-        .eq("id", id)
-        .single();
-
+      const target = await supabaseAdmin.from("profiles").select("id, role").eq("id", id).single();
       if (target.error) return res.status(400).json({ error: target.error.message });
 
       const targetRole = target.data.role;
@@ -591,16 +570,11 @@ app.patch(
 app.get("/proposals", requireAuth, async (req, res) => {
   const status = req.query.status;
 
-  let q = supabaseAdmin
-    .from("proposals")
-    .select("*")
-    .order("created_at", { ascending: false });
+  let q = supabaseAdmin.from("proposals").select("*").order("created_at", { ascending: false });
 
-  // Students still see approved only
   if (req.user.role === "student") {
     q = q.eq("status", "approved");
   } else {
-    // Officer/President/Dean can optionally filter by status
     if (status) q = q.eq("status", status);
   }
 
@@ -673,7 +647,8 @@ app.patch("/proposals/:id", requireAuth, requireRole("officer", "president"), as
 
   if (current.error) return res.status(400).json({ error: current.error.message });
   if (current.data.created_by !== req.user.id) return res.status(403).json({ error: "Not your proposal" });
-  if (current.data.status !== "pending") return res.status(400).json({ error: "Only pending proposals can be edited" });
+  if (current.data.status !== "pending")
+    return res.status(400).json({ error: "Only pending proposals can be edited" });
 
   const updatePayload = { ...body.data };
 
@@ -757,7 +732,8 @@ app.post("/payments", requireAuth, requireRole("student"), async (req, res) => {
     .single();
 
   if (proposal.error) return res.status(400).json({ error: proposal.error.message });
-  if (proposal.data.status !== "approved") return res.status(400).json({ error: "Event not available (not approved)" });
+  if (proposal.data.status !== "approved")
+    return res.status(400).json({ error: "Event not available (not approved)" });
 
   const required = toNum(proposal.data.required_per_student);
 
@@ -823,37 +799,41 @@ app.get("/my/payments", requireAuth, requireRole("student"), async (req, res) =>
 
 /**
  * Officer/President: view payments for a proposal
- * UPDATED: Officer can view ANY proposal payments
+ * UPDATED: includes student.ccs_id_no so frontend can display ID numbers
  */
 app.get(
   "/officer/proposals/:id/payments",
   requireAuth,
   requireRole("officer", "president"),
   async (req, res) => {
+    const proposalId = req.params.id;
+
     const { data, error } = await supabaseAdmin
-  .from("payments")
-  .select(`
-    id,
-    proposal_id,
-    student_id,
-    amount,
-    method,
-    reference_no,
-    paid_at,
-    receipts(*),
-    student:profiles (
-      id,
-      ccs_id_no,
-      first_name,
-      middle_name,
-      last_name,
-      full_name,
-      course,
-      year_level
-    )
-  `)
-  .eq("proposal_id", proposalId)
-  .order("paid_at", { ascending: false });
+      .from("payments")
+      .select(
+        `
+        id,
+        proposal_id,
+        student_id,
+        amount,
+        method,
+        reference_no,
+        paid_at,
+        receipts(*),
+        student:profiles (
+          id,
+          ccs_id_no,
+          first_name,
+          middle_name,
+          last_name,
+          full_name,
+          course,
+          year_level
+        )
+      `
+      )
+      .eq("proposal_id", proposalId)
+      .order("paid_at", { ascending: false });
 
     if (error) return res.status(400).json({ error: error.message });
     res.json(data);
