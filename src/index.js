@@ -843,39 +843,83 @@ app.get(
 /**
  * REPORTS
  * Dean/President: department-level totals
+ *
+ * Budget meaning (UPDATED):
+ * - expected total collection from ALL students (role='student')
+ * - expected_total = required_per_student * student_count
+ * - remaining_budget = max(expected_total - collected_total, 0)
+ *
+ * Notes:
+ * - Only APPROVED proposals are treated as collectible events.
+ *   Pending/Rejected proposals will have budget_total = 0 and remaining_budget = 0.
  */
-app.get("/reports/department", requireAuth, requireRole("dean", "president"), async (req, res) => {
-  const proposals = await supabaseAdmin
-    .from("proposals")
-    .select("id, title, status, budget_total, required_per_student");
+app.get(
+  "/reports/department",
+  requireAuth,
+  requireRole("dean", "president"),
+  async (req, res) => {
+    // 1) Count students (role = student)
+    const studentCountRes = await supabaseAdmin
+      .from("profiles")
+      .select("id", { count: "exact", head: true })
+      .eq("role", "student");
 
-  if (proposals.error) return res.status(400).json({ error: proposals.error.message });
+    if (studentCountRes.error) {
+      return res.status(400).json({ error: studentCountRes.error.message });
+    }
 
-  const payments = await supabaseAdmin.from("payments").select("proposal_id, amount");
-  if (payments.error) return res.status(400).json({ error: payments.error.message });
+    const student_count = studentCountRes.count || 0;
 
-  const collectedByProposal = new Map();
-  for (const p of payments.data || []) {
-    const k = p.proposal_id;
-    collectedByProposal.set(k, (collectedByProposal.get(k) || 0) + toNum(p.amount));
+    // 2) Load proposals
+    const proposals = await supabaseAdmin
+      .from("proposals")
+      .select("id, title, status, budget_total, required_per_student");
+
+    if (proposals.error) {
+      return res.status(400).json({ error: proposals.error.message });
+    }
+
+    // 3) Load payments
+    const payments = await supabaseAdmin.from("payments").select("proposal_id, amount");
+    if (payments.error) {
+      return res.status(400).json({ error: payments.error.message });
+    }
+
+    const collectedByProposal = new Map();
+    for (const p of payments.data || []) {
+      const k = p.proposal_id;
+      collectedByProposal.set(k, (collectedByProposal.get(k) || 0) + toNum(p.amount));
+    }
+
+    // 4) Build report rows
+    const rows = (proposals.data || []).map((pr) => {
+      const collected = collectedByProposal.get(pr.id) || 0;
+
+      // per-student amount (prefer required_per_student; fallback to budget_total)
+      const perStudent = toNum(pr.required_per_student || pr.budget_total);
+
+      // Only approved proposals are collectible events
+      const expectedTotal = pr.status === "approved" ? perStudent * student_count : 0;
+
+      return {
+        proposal_id: pr.id,
+        title: pr.title,
+        status: pr.status,
+
+        // extra info (optional but useful)
+        student_count,
+        required_per_student: perStudent,
+
+        // UPDATED meaning:
+        budget_total: expectedTotal,
+        collected_total: collected,
+        remaining_budget: Math.max(expectedTotal - collected, 0),
+      };
+    });
+
+    res.json(rows);
   }
-
-  const rows = (proposals.data || []).map((pr) => {
-    const collected = collectedByProposal.get(pr.id) || 0;
-    const budgetTotal = toNum(pr.budget_total);
-    return {
-      proposal_id: pr.id,
-      title: pr.title,
-      status: pr.status,
-      budget_total: budgetTotal,
-      collected_total: collected,
-      remaining_budget: Math.max(budgetTotal - collected, 0),
-      required_per_student: toNum(pr.required_per_student),
-    };
-  });
-
-  res.json(rows);
-});
+);
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`DBMS-backend running on port ${PORT}`));
