@@ -527,22 +527,52 @@ app.patch("/accounts/:id/enable", requireAuth, requireRole("dean", "president"),
 });
 
 /**
- * PROPOSALS
+ * PROPOSALS (with creator info)
  */
 app.get("/proposals", requireAuth, async (req, res) => {
   const status = req.query.status;
 
-  let q = supabaseAdmin.from("proposals").select("*").order("created_at", { ascending: false });
+  let q = supabaseAdmin
+    .from("proposals")
+    .select("*")
+    .order("created_at", { ascending: false });
 
+  // Students see approved only
   if (req.user.role === "student") {
     q = q.eq("status", "approved");
   } else {
+    // Officer/President/Dean can optionally filter by status
     if (status) q = q.eq("status", status);
   }
 
   const { data, error } = await q;
   if (error) return res.status(400).json({ error: error.message });
-  res.json(data);
+
+  const proposals = data || [];
+
+  // Collect unique created_by IDs
+  const creatorIds = [...new Set(proposals.map((p) => p.created_by).filter(Boolean))];
+
+  // Fetch creator profiles (names/titles)
+  let creatorsMap = new Map();
+  if (creatorIds.length) {
+    const creators = await supabaseAdmin
+      .from("profiles")
+      .select("id, full_name, first_name, middle_name, last_name, role, officer_title, ccs_id_no")
+      .in("id", creatorIds);
+
+    if (creators.error) return res.status(400).json({ error: creators.error.message });
+
+    creatorsMap = new Map((creators.data || []).map((c) => [c.id, c]));
+  }
+
+  // Attach creator object
+  const enriched = proposals.map((p) => ({
+    ...p,
+    creator: p.created_by ? creatorsMap.get(p.created_by) || null : null,
+  }));
+
+  res.json(enriched);
 });
 
 app.post("/proposals", requireAuth, requireRole("officer", "president"), async (req, res) => {
