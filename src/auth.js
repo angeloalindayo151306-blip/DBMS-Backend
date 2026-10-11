@@ -25,20 +25,23 @@ export async function requireAuth(req, res, next) {
 
     const prof = await supabaseAdmin
       .from("profiles")
-      .select(`
-        role,
-        full_name,
-        officer_title,
-        first_name,
-        middle_name,
-        last_name,
-        date_of_birth,
-        age,
-        address,
-        mobile_number,
-        course,
-        year_level
-      `)
+      .select(
+        `
+          role,
+          ccs_id_no,
+          full_name,
+          officer_title,
+          first_name,
+          middle_name,
+          last_name,
+          date_of_birth,
+          age,
+          address,
+          mobile_number,
+          course,
+          year_level
+        `
+      )
       .eq("id", userId)
       .single();
 
@@ -52,6 +55,8 @@ export async function requireAuth(req, res, next) {
       email: data.user.email ?? null,
 
       role: prof.data.role,
+      ccs_id_no: prof.data.ccs_id_no ?? null,
+
       full_name: prof.data.full_name,
       officer_title: prof.data.officer_title ?? null,
 
