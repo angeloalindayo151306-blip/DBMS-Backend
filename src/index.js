@@ -859,6 +859,55 @@ app.post("/expenses", requireAuth, requireRole("officer", "president"), async (r
 });
 
 /**
+ * Edit expense (Officer/President)
+ * - only the creator (spent_by) can edit
+ * - only allowed while status is pending
+ */
+app.patch("/expenses/:id", requireAuth, requireRole("officer", "president"), async (req, res) => {
+  const schema = z.object({
+    proposal_id: z.string().uuid().nullable().optional(),
+    item_name: z.string().min(2).optional(),
+    qty: z.number().int().positive().nullable().optional(),
+    amount: z.number().positive().optional(),
+    spent_at: z.string().datetime().optional(),
+    notes: z.string().nullable().optional(),
+  });
+
+  const body = schema.safeParse(req.body);
+  if (!body.success) return res.status(400).json(body.error);
+
+  const expenseId = req.params.id;
+
+  const current = await supabaseAdmin
+    .from("expenses")
+    .select("id, spent_by, status")
+    .eq("id", expenseId)
+    .single();
+
+  if (current.error) return res.status(400).json({ error: current.error.message });
+  if (!current.data) return res.status(404).json({ error: "Expense not found" });
+
+  if (String(current.data.spent_by) !== String(req.user.id)) {
+    return res.status(403).json({ error: "You can only edit your own expenses." });
+  }
+
+  if (current.data.status !== "pending") {
+    return res.status(400).json({ error: "Only pending expenses can be edited." });
+  }
+
+  const updatePayload = { ...body.data };
+
+  const { data, error } = await supabaseAdmin
+    .from("expenses")
+    .update(updatePayload)
+    .eq("id", expenseId)
+    .select("*")
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+/**
  * Upload receipt image (Officer/President)
  * - only the creator (spent_by) can upload
  * - only allowed while status is pending
